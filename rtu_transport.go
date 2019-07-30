@@ -119,7 +119,7 @@ func (rt *rtuTransport) readRTUFrame(isRequest bool) (res *pdu, err error) {
 
 	rxbuf		= make([]byte, maxRTUFrameLength)
 
-	// read the serial ADU header: unit id (1 byte), response code (1 byte) and
+	// read the serial ADU header: unit id (1 byte), function code (1 byte) and
 	// PDU length/exception code (1 byte)
 	byteCount, err	= io.ReadFull(rt.link, rxbuf[0:3])
 	if err != nil && err != io.ErrUnexpectedEOF {
