@@ -2,7 +2,6 @@ package modbus
 
 import (
 	"fmt"
-	"io"
 	"time"
 )
 
@@ -114,57 +113,52 @@ func (rt *rtuTransport) interFrameDelay() (delay time.Duration) {
 func (rt *rtuTransport) readRTUFrame(isRequest bool) (res *pdu, err error) {
 	var rxbuf	[]byte
 	var byteCount	int
-	var bytesNeeded	int
+	var n		int
 	var crc		crc
+	var start	time.Time
 
 	rxbuf		= make([]byte, maxRTUFrameLength)
 
-	// read the serial ADU header: unit id (1 byte), function code (1 byte) and
-	// PDU length/exception code (1 byte)
-	byteCount, err	= io.ReadFull(rt.link, rxbuf[0:3])
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return
+	// mark the time
+	start		= time.Now()
+
+	// attempt to read for as long as we're allowed to
+	for time.Since(start) < rt.timeout {
+
+		// grab as many bytes as we can in ~1.5 character times
+		n, err	= rt.link.Read(rxbuf[byteCount:])
+		if err != nil {
+			return
+		} else {
+			byteCount += n
+		}
+
+		// stop reading if either:
+		// - we've read the max number of bytes an RTU frame is allowed to have,
+		// - we detected the end of the frame (1.5 character times has elapsed
+		//   without any data being transmitted)
+		if byteCount > 0 && n == 0 || byteCount == maxRTUFrameLength {
+			break
+		}
 	}
-	if byteCount != 3 {
-		err = ErrShortFrame
+
+	if byteCount == 0 {
+		err = ErrRequestTimedOut
 		return
 	}
 
-	// figure out how many further bytes to read
-	if isRequest {
-		bytesNeeded, err = expectedRequestLenth(uint8(rxbuf[1]), uint8(rxbuf[2]))
-	} else {
-		bytesNeeded, err = expectedResponseLenth(uint8(rxbuf[1]), uint8(rxbuf[2]))
-	}
-	if err != nil {
-		return
-	}
-
-	// we need to read 2 additional bytes of CRC after the payload
-	bytesNeeded	+= 2
-
-	// never read more than the max allowed frame length
-	if byteCount + bytesNeeded > maxRTUFrameLength {
-		err	= ErrProtocolError
-		return
-	}
-
-	byteCount, err	= io.ReadFull(rt.link, rxbuf[3:3 + bytesNeeded])
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return
-	}
-	if byteCount != bytesNeeded {
-		rt.logger.Warningf("expected %v bytes, received %v", bytesNeeded, byteCount)
+	// we need at the very least a unit ID + function code + 2 bytes of CRC
+	if byteCount <= 4 {
 		err = ErrShortFrame
 		return
 	}
 
 	// compute the CRC on the entire frame, excluding the CRC
 	crc.init()
-	crc.add(rxbuf[0:3 + bytesNeeded - 2])
+	crc.add(rxbuf[0:byteCount - 2])
 
 	// compare CRC values
-	if !crc.isEqual(rxbuf[3 + bytesNeeded - 2], rxbuf[3 + bytesNeeded - 1]) {
+	if !crc.isEqual(rxbuf[byteCount - 2], rxbuf[byteCount - 1]) {
 		err = ErrBadCRC
 		return
 	}
@@ -173,7 +167,7 @@ func (rt *rtuTransport) readRTUFrame(isRequest bool) (res *pdu, err error) {
 		unitId:		rxbuf[0],
 		functionCode:	rxbuf[1],
 		// pass the byte count + trailing data as payload, withtout the CRC
-		payload:	rxbuf[2:3 + bytesNeeded  - 2],
+		payload:	rxbuf[2:byteCount - 2],
 	}
 
 	return
@@ -193,39 +187,6 @@ func (rt *rtuTransport) assembleRTUFrame(p *pdu) (adu []byte) {
 
 	// append the CRC to the ADU
 	adu	= append(adu, crc.value()...)
-
-	return
-}
-
-// Computes the expected length of a modbus RTU request.
-func expectedRequestLenth(responseCode uint8, responseLength uint8) (byteCount int, err error) {
-	err = fmt.Errorf("unexpected response code (%v)", responseCode)
-	return
-}
-
-// Computes the expected length of a modbus RTU response.
-func expectedResponseLenth(responseCode uint8, responseLength uint8) (byteCount int, err error) {
-	switch responseCode {
-	case FC_READ_HOLDING_REGISTERS,
-	     FC_READ_INPUT_REGISTERS,
-	     FC_READ_COILS,
-	     FC_READ_DISCRETE_INPUTS:		byteCount = int(responseLength)
-	case FC_WRITE_SINGLE_REGISTER,
-	     FC_WRITE_MULTIPLE_REGISTERS,
-	     FC_WRITE_SINGLE_COIL,
-	     FC_WRITE_MULTIPLE_COILS:		byteCount = 3
-	case FC_MASK_WRITE_REGISTER:		byteCount = 5
-	case FC_READ_HOLDING_REGISTERS | 0x80,
-	     FC_READ_INPUT_REGISTERS | 0x80,
-	     FC_READ_COILS | 0x80,
-	     FC_READ_DISCRETE_INPUTS | 0x80,
-	     FC_WRITE_SINGLE_REGISTER | 0x80,
-	     FC_WRITE_MULTIPLE_REGISTERS | 0x80,
-	     FC_WRITE_SINGLE_COIL | 0x80,
-	     FC_WRITE_MULTIPLE_COILS | 0x80,
-	     FC_MASK_WRITE_REGISTER | 0x80:	byteCount = 0
-	default: err = fmt.Errorf("unexpected response code (%v)", responseCode)
-	}
 
 	return
 }
